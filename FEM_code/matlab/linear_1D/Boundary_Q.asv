@@ -1,0 +1,19 @@
+function qb = Boundary_Q( ...
+    type_dimesion,element, ...
+    points,topolosy,q_fun,q_fun_order)
+    if type_dimesion==1
+        qb = zeros(size(points,1),1);
+        nodes = points(topolosy(element,:),:)
+        X = points(nodes(2))-points(nodes(1));
+        if q_fun_order ==0
+           qb(nodes) = q_fun*X/2*[1;1]; 
+        elseif q_fun_order ==1
+            [Gauss_weights,Gauss_points] = create_Gauss(1,2);
+            qb_value1 = Gauss_weights(1)*feval(q_fun*(1-x)/2,Gauss_points(1))+Gauss_weights(2)*feval(q_fun*(1-x)/2,Gauss_points(2));
+            qb_value2 = Gauss_weights(1)*feval(q_fun*(1+x)/2,Gauss_points(1))+Gauss_weights(2)*feval(q_fun*(1+x)/2,Gauss_points(2));
+            qb(nodes) = [qb_value1;qb_value2];
+        end
+        
+        
+    end
+end
