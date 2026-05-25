@@ -1,5 +1,10 @@
-function J = create_Jacobi(p1,p2)
-    x = P2(1,1)-p1(1,1);
-    y = P2(1,2)-P1(1,2);
-    J = sqer(x^2+y^2);
+function J = create_Jacobi(p1, p2)
+
+    dx = p2(1) - p1(1);
+    dy = p2(2) - p1(2);
+
+    L = sqrt(dx^2 + dy^2);
+
+    J = L / 2;
+
 end

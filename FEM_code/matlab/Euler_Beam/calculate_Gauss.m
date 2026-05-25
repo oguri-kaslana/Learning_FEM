@@ -1,7 +1,7 @@
 function [Gp,Gw] = calculate_Gauss(number_Gp)
     if number_Gp == 1
         Gp = 0;
-        Gw = 3;
+        Gw = 2;
     elseif number_Gp == 2
         Gp = [-sqrt(1/3);sqrt(1/3)];
         Gw = [1;1];
