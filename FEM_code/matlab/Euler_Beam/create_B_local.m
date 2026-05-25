@@ -1,0 +1,9 @@
+function B_local = create_B_local(xi)
+        B_local = [
+        3/2 * xi, ...
+        L/4 * (-1 + 3 * xi), ...
+       -3/2 * xi, ...
+        L/4 * ( 1 + 3 * xi)
+    ];
+
+end
