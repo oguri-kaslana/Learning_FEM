@@ -1,0 +1,2262 @@
+
+请为我生成一个完整的 C++ 有限元大作业项目，用于完成“带中心椭圆孔矩形板的四节点四边形等参元有限元分析”。
+
+这是二维平面应力问题。原始问题为：矩形板中间有椭圆孔，左端固定，右端施加均布拉伸载荷 q，厚度 t = 1 mm，材料参数 E = 110000 MPa，nu = 0.3，长度 L = 84 mm。要求使用四节点四边形等参元 Q4 进行有限元建模分析，输出位移、应变、应力，并分析椭圆孔轴比 b/a 从 1 到 5 变化时孔边应力云图变化。附加题要求实现 Jacobi、高斯-赛德尔、SOR 等迭代法并比较计算效率。
+
+本项目采用 C++ 实现有限元主体计算，MATLAB 只负责读取 C++ 输出结果并绘图。
+
+请注意：
+
+1. 本项目采用 1/2 板模型，不采用 1/4 板模型。
+2. 原问题左端固定、右端受拉，关于竖直中线不对称，因此不能严格简化为 1/4 板。
+3. 原问题关于水平中线 y = 0 对称，因此可以取上半板进行计算。
+4. 代码中需要同时实现基础版本和加速版本。
+5. 如果某一过程存在多种算法或多种加速方案，必须全部写出，并提供 main 函数开头的切换接口。
+6. 每个主要函数文件都必须加入计时功能。
+7. 所有求解器、装配方式、矩阵存储方式、后处理方式、并行方式都要输出耗时、残差、迭代次数、结果误差和加速比。
+
+============================================================
+一、总体建模要求
+============================================================
+
+采用上半板模型。
+
+完整板坐标范围：
+
+x ∈ [0, L]
+y ∈ [-H/2, H/2]
+
+1/2 上半板坐标范围：
+
+x ∈ [0, L]
+y ∈ [0, H/2]
+
+椭圆孔中心：
+
+cx = L / 2
+cy = 0
+
+完整椭圆孔方程：
+
+((x - cx)^2) / a^2 + ((y - cy)^2) / b^2 = 1
+
+上半板模型中只保留上半椭圆孔边界：
+
+theta ∈ [0, pi]
+
+上半椭圆边界：
+
+x = cx + a cos(theta)
+y = b sin(theta)
+
+水平对称边界 y = 0 被椭圆孔切断，因此对称边界分成两段：
+
+1. 左侧对称边界：
+
+x ∈ [0, cx - a], y = 0
+
+2. 右侧对称边界：
+
+x ∈ [cx + a, L], y = 0
+
+这两段施加对称边界条件：
+
+v = 0
+u 不约束
+
+左端边界：
+
+x = 0, y ∈ [0, H/2]
+
+保持固定：
+
+u = 0
+v = 0
+
+右端边界：
+
+x = L, y ∈ [0, H/2]
+
+施加均布拉伸载荷 q，方向为 +x。
+
+因为采用 1/2 板模型，右端总外力应为：
+
+F_total_half = q * (H/2) * t
+
+右端每条边的一致节点力为：
+
+Fx_node = q * le * t / 2
+
+其中 le 为该边长度。
+
+上边界：
+
+y = H/2
+
+自由边界。
+
+椭圆孔边界：
+
+自由边界。
+
+============================================================
+二、材料参数、几何参数、网格参数、载荷参数、求解参数、加速参数 class 要求
+============================================================
+
+请使用 C++ class 管理参数和调用流程。
+
+至少设计以下 class 或 struct。
+
+------------------------------------------------------------
+1. MaterialParam
+------------------------------------------------------------
+
+功能：
+
+管理材料参数和平面应力本构矩阵。
+
+成员变量：
+
+double E;
+double nu;
+double t;
+double D[3][3];
+
+成员函数：
+
+void build_material();
+void print_material();
+
+其中 build_material() 根据平面应力公式生成本构矩阵：
+
+D = E / (1 - nu^2) *
+[ 1      nu          0
+  nu     1           0
+  0      0     (1 - nu) / 2 ]
+
+------------------------------------------------------------
+2. GeometryParam
+------------------------------------------------------------
+
+功能：
+
+管理几何参数。
+
+成员变量：
+
+double L;
+double H;
+double cx;
+double cy;
+double R0;
+double ratio;
+double a;
+double b;
+
+成员函数：
+
+void build_geometry();
+void print_geometry();
+
+其中：
+
+L = 84 mm
+H 默认取 84 mm，但要在 main 函数开头可修改。
+R0 为基准圆孔半径，默认 R0 = 6 mm。
+ratio = b / a。
+
+保持孔洞面积不变：
+
+A0 = pi * R0^2
+
+不同 ratio 下：
+
+a = R0 / sqrt(ratio)
+b = R0 * sqrt(ratio)
+
+------------------------------------------------------------
+3. MeshParam
+------------------------------------------------------------
+
+功能：
+
+管理网格密度、加密带参数和网格质量参数。
+
+成员变量：
+
+int n_theta;
+int n_inner;
+int n_outer;
+double lambda;
+double min_detJ;
+double max_detJ;
+bool use_fast_mesh;
+
+默认值：
+
+n_theta = 96;        // 上半椭圆方向分段数，必须为偶数
+n_inner = 8;         // 椭圆孔到外相似椭圆之间的加密层数
+n_outer = 12;        // 外相似椭圆到矩形外边界的过渡层数
+lambda = 1.8;        // 外相似椭圆放大系数
+use_fast_mesh = true;
+
+成员函数：
+
+void print_mesh_param();
+
+说明：
+
+lambda 控制孔边加密带外边界大小。外相似椭圆半轴为：
+
+A = lambda * a
+B = lambda * b
+
+------------------------------------------------------------
+4. LoadParam
+------------------------------------------------------------
+
+功能：
+
+管理载荷大小、载荷方向、作用边界和载荷检查信息。
+
+成员变量：
+
+double q;
+int direction;       // 0 表示 x 方向，1 表示 y 方向
+double total_force;
+
+默认：
+
+q = 1.0 MPa = 1.0 N/mm^2
+direction = 0，即 +x 方向
+
+成员函数：
+
+void print_load();
+
+------------------------------------------------------------
+5. SolverParam
+------------------------------------------------------------
+
+功能：
+
+管理所有线性方程组求解参数、迭代参数和方法开关。
+
+成员变量：
+
+double tol;
+int max_iter;
+
+bool run_direct_dense_full;
+bool run_direct_dense_block;
+bool run_direct_sparse_block_to_dense;
+bool run_cholesky_dense;
+bool run_ldlt_dense;
+
+bool run_jacobi_dense;
+bool run_gauss_seidel_dense;
+bool run_sor_dense;
+bool run_cg_dense;
+bool run_pcg_dense;
+
+bool run_jacobi_sparse;
+bool run_gauss_seidel_sparse;
+bool run_sor_sparse;
+bool run_cg_sparse;
+bool run_pcg_sparse;
+
+vector<double> omegas;
+
+默认：
+
+tol = 1e-8;
+max_iter = 200000;
+
+run_direct_dense_full = true;
+run_direct_dense_block = true;
+run_direct_sparse_block_to_dense = true;
+
+run_cholesky_dense = true;
+run_ldlt_dense = false;
+
+run_jacobi_dense = true;
+run_gauss_seidel_dense = true;
+run_sor_dense = true;
+run_cg_dense = true;
+run_pcg_dense = true;
+
+run_jacobi_sparse = true;
+run_gauss_seidel_sparse = true;
+run_sor_sparse = true;
+run_cg_sparse = true;
+run_pcg_sparse = true;
+
+omegas = {1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9};
+
+成员函数：
+
+void print_solver_param();
+
+说明：
+
+1. Jacobi、Gauss-Seidel、SOR 是题目附加题要求，必须实现。
+2. CG 和 PCG 是额外加速求解器，也要实现并计时。
+3. Cholesky 或 LDLT 可作为直接法加速方案。由于有限元刚度矩阵施加边界后通常为对称正定矩阵，所以可尝试 Cholesky；如果矩阵不满足正定条件，应自动跳过并输出 warning。
+
+------------------------------------------------------------
+6. SpeedParam
+------------------------------------------------------------
+
+功能：
+
+管理代码加速相关参数。
+
+定义运行模式：
+
+enum RunMode {
+    BASE_MODE,
+    FAST_MODE,
+    BOTH_MODE
+};
+
+定义矩阵类型：
+
+enum MatrixMode {
+    DENSE_MATRIX,
+    SPARSE_MATRIX,
+    BOTH_MATRIX
+};
+
+定义装配模式：
+
+enum AssembleMode {
+    ASSEMBLE_DENSE_BASE,
+    ASSEMBLE_DENSE_FAST,
+    ASSEMBLE_COO_CSR,
+    ASSEMBLE_ALL
+};
+
+定义后处理模式：
+
+enum StressMode {
+    CENTER_STRESS,
+    GAUSS_AVERAGE_STRESS,
+    BOTH_STRESS
+};
+
+成员变量：
+
+RunMode run_mode;
+MatrixMode matrix_mode;
+AssembleMode assemble_mode;
+StressMode stress_mode;
+
+bool use_sparse_matrix;
+bool use_fast_mesh;
+bool use_fast_assemble;
+bool use_fast_boundary;
+bool use_fast_post;
+bool use_fast_io;
+bool use_precompute_gauss;
+bool use_precompute_edof;
+bool use_static_local_array;
+bool use_parallel_loop;
+bool compare_base_fast;
+bool compare_solver_result;
+
+int timer_detail_level;
+
+默认：
+
+run_mode = BOTH_MODE;
+matrix_mode = BOTH_MATRIX;
+assemble_mode = ASSEMBLE_ALL;
+stress_mode = CENTER_STRESS;
+
+use_sparse_matrix = true;
+use_fast_mesh = true;
+use_fast_assemble = true;
+use_fast_boundary = true;
+use_fast_post = true;
+use_fast_io = true;
+use_precompute_gauss = true;
+use_precompute_edof = true;
+use_static_local_array = true;
+use_parallel_loop = false;
+compare_base_fast = true;
+compare_solver_result = true;
+timer_detail_level = 2;
+
+成员函数：
+
+void print_speed_param();
+
+说明：
+
+1. BASE_MODE 只运行基础版本。
+2. FAST_MODE 只运行加速版本。
+3. BOTH_MODE 同时运行基础版本和加速版本，并输出误差、耗时、加速比。
+4. use_parallel_loop 默认 false，避免编译环境不支持 OpenMP。
+5. 如果开启 OpenMP，代码使用宏控制：
+
+#ifdef USE_OPENMP
+#include <omp.h>
+#endif
+
+并在 read_me.md 中说明：
+
+如果编译器支持 OpenMP，可以使用：
+
+g++ ... -fopenmp -DUSE_OPENMP
+
+如果不启用 OpenMP，代码仍必须正常运行。
+
+------------------------------------------------------------
+7. NodeInfo
+------------------------------------------------------------
+
+功能：
+
+管理节点信息。
+
+成员变量：
+
+int id;
+double x;
+double y;
+
+int flag_left;
+int flag_right;
+int flag_top;
+int flag_sym;
+int flag_hole;
+
+说明：
+
+flag_left = 1 表示左固定边界节点。
+flag_right = 1 表示右端受力边界节点。
+flag_top = 1 表示上自由边界节点。
+flag_sym = 1 表示水平对称边界节点。
+flag_hole = 1 表示椭圆孔边界节点。
+
+------------------------------------------------------------
+8. ElementInfo
+------------------------------------------------------------
+
+功能：
+
+管理单元信息。
+
+成员变量：
+
+int id;
+int node[4];
+int dof[8];
+
+单元节点必须按逆时针方向排列：
+
+n1, n2, n3, n4
+
+dof 存储该单元的 8 个自由度编号，避免装配时重复计算。
+
+------------------------------------------------------------
+9. BoundaryEdge
+------------------------------------------------------------
+
+功能：
+
+管理边界边信息。
+
+成员变量：
+
+int id;
+int n1;
+int n2;
+int marker;
+
+marker 含义：
+
+1 = left_fixed
+2 = right_traction
+3 = top_free
+4 = symmetry
+5 = hole_free
+
+------------------------------------------------------------
+10. GaussData
+------------------------------------------------------------
+
+功能：
+
+保存高斯点预计算数据。
+
+成员变量：
+
+double xi;
+double eta;
+double weight;
+double N[4];
+double dN_dxi[4];
+double dN_deta[4];
+
+说明：
+
+Q4 单元 2 × 2 高斯积分点固定，因此 N、dN_dxi、dN_deta 可以预计算一次，后续反复使用。
+
+------------------------------------------------------------
+11. SolverInfo
+------------------------------------------------------------
+
+功能：
+
+保存每个求解器的结果和耗时信息。
+
+成员变量：
+
+string method;
+string matrix_type;
+double omega;
+bool converged;
+int iterations;
+double time_seconds;
+double final_residual;
+double max_displacement;
+int n_dof;
+int n_solve_dof;
+
+------------------------------------------------------------
+12. ElementResult
+------------------------------------------------------------
+
+功能：
+
+保存单元后处理结果。
+
+成员变量：
+
+int elem_id;
+double x_center;
+double y_center;
+
+double epsilon_x;
+double epsilon_y;
+double gamma_xy;
+
+double sigma_x;
+double sigma_y;
+double tau_xy;
+double sigma_vm;
+
+------------------------------------------------------------
+13. CaseSummary
+------------------------------------------------------------
+
+功能：
+
+保存每个 ratio 的汇总结果。
+
+成员变量：
+
+double ratio;
+double a;
+double b;
+
+double max_ux;
+double max_uy;
+double max_umag;
+
+double max_sigma_x;
+double max_sigma_y;
+double max_tau_xy;
+double max_sigma_vm;
+
+int max_sigma_vm_elem;
+double max_sigma_vm_x;
+double max_sigma_vm_y;
+
+double Kt_x;
+double Kt_vm;
+
+------------------------------------------------------------
+14. ModelData
+------------------------------------------------------------
+
+功能：
+
+集中管理节点、单元、边界边、总体矩阵、载荷、位移和结果数据。
+
+成员变量建议：
+
+vector<NodeInfo> nodes;
+vector<ElementInfo> elements;
+vector<BoundaryEdge> edges;
+
+vector<double> K_dense;
+vector<double> F;
+vector<double> U;
+
+vector<int> fixed_dof;
+vector<int> free_dof;
+vector<char> is_fixed;
+
+SparseCOO K_coo;
+SparseCSR K_csr;
+
+vector<GaussData> gauss_data;
+vector<ElementResult> elem_result;
+
+CaseSummary summary;
+
+成员函数可根据需要设计。
+
+============================================================
+三、main 函数要求
+============================================================
+
+main.cpp 开头必须集中给出所有可调参数，不要散落在各个函数内部。
+
+main 函数开头应包含以下参数接口：
+
+// 几何参数
+double L = 84.0;
+double H = 84.0;
+double R0 = 6.0;
+
+// 材料参数
+double E = 110000.0;
+double nu = 0.3;
+double t = 1.0;
+
+// 载荷参数
+double q = 1.0;
+
+// 网格参数
+int n_theta = 96;
+int n_inner = 8;
+int n_outer = 12;
+double lambda = 1.8;
+
+// 求解参数
+double tol = 1e-8;
+int max_iter = 200000;
+
+// 椭圆孔轴比工况
+vector<double> ratios = {1.0, 2.0, 3.0, 4.0, 5.0};
+
+// SOR 松弛因子
+vector<double> omegas = {1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9};
+
+// 运行模式
+RunMode run_mode = BOTH_MODE;
+MatrixMode matrix_mode = BOTH_MATRIX;
+AssembleMode assemble_mode = ASSEMBLE_ALL;
+StressMode stress_mode = CENTER_STRESS;
+
+// 加速开关
+bool use_sparse_matrix = true;
+bool use_fast_mesh = true;
+bool use_fast_assemble = true;
+bool use_fast_boundary = true;
+bool use_fast_post = true;
+bool use_fast_io = true;
+bool use_precompute_gauss = true;
+bool use_precompute_edof = true;
+bool use_static_local_array = true;
+bool use_parallel_loop = false;
+bool compare_base_fast = true;
+bool compare_solver_result = true;
+
+// 求解器开关
+bool run_direct_dense_full = true;
+bool run_direct_dense_block = true;
+bool run_direct_sparse_block_to_dense = true;
+bool run_cholesky_dense = true;
+
+bool run_jacobi_dense = true;
+bool run_gauss_seidel_dense = true;
+bool run_sor_dense = true;
+bool run_cg_dense = true;
+bool run_pcg_dense = true;
+
+bool run_jacobi_sparse = true;
+bool run_gauss_seidel_sparse = true;
+bool run_sor_sparse = true;
+bool run_cg_sparse = true;
+bool run_pcg_sparse = true;
+
+// 计时精度
+int timer_detail_level = 2;
+
+// 输出路径
+string output_root = "output";
+
+main 函数主要流程：
+
+for each ratio:
+
+    timer.start_time("total_case_time");
+
+    1. 创建 MaterialParam
+    2. 创建 GeometryParam
+    3. 创建 MeshParam
+    4. 创建 LoadParam
+    5. 创建 SolverParam
+    6. 创建 SpeedParam
+    7. 调用 create_mesh 生成 1/2 板网格
+    8. 调用 check_mesh 检查单元质量
+    9. 调用 create_Gauss 预计算高斯点数据
+    10. 调用 create_edof 预计算每个单元的自由度编号
+    11. 调用 create_K_global 组装总体刚度矩阵
+    12. 调用 apply_load 施加右端均布载荷
+    13. 调用 create_dof_set 生成 fixed_dof、free_dof、is_fixed
+    14. 调用 apply_boundary 施加固定边界和对称边界
+    15. 调用 solve_direct 运行所有被开启的直接法
+    16. 调用 solve_iterative 运行所有被开启的迭代法
+    17. 选择一个主解 U_ref 进行后处理，默认优先使用 direct_dense_block 或 pcg_sparse
+    18. 调用 calculate_result 计算应变、应力、von Mises 应力
+    19. 调用 calculate_summary 统计最大位移、最大应力、Kt
+    20. 调用 compare_solver_result 比较不同求解器结果误差
+    21. 调用 write_result 输出结果
+    22. 输出 time_summary.csv
+
+    timer.stop_time("total_case_time");
+
+全部工况结束后：
+
+1. 输出 summary_ratio.csv
+2. 输出 summary_solver.csv
+3. 输出 summary_time.csv
+4. 输出 compare_base_fast.csv
+5. 输出 compare_solver_result.csv
+
+============================================================
+四、最终文件结构要求
+============================================================
+
+请按照下面的结构生成完整项目：
+
+FEM_Q4_HalfPlate_Ellipse/
+│
+├─ main.cpp
+│
+├─ fem_class.h
+├─ fem_class.cpp
+│
+├─ time_record.h
+├─ time_record.cpp
+│
+├─ sparse_matrix.h
+├─ sparse_matrix.cpp
+│
+├─ create_node.h
+├─ create_node.cpp
+│
+├─ create_mesh.h
+├─ create_mesh.cpp
+│
+├─ create_Jacobi.h
+├─ create_Jacobi.cpp
+│
+├─ create_B.h
+├─ create_B.cpp
+│
+├─ create_K.h
+├─ create_K.cpp
+│
+├─ boundary_condition.h
+├─ boundary_condition.cpp
+│
+├─ calculate_result.h
+├─ calculate_result.cpp
+│
+├─ solve_direct.h
+├─ solve_direct.cpp
+│
+├─ solve_iterative.h
+├─ solve_iterative.cpp
+│
+├─ solve_algebra.h
+├─ solve_algebra.cpp
+│
+├─ write_result.h
+├─ write_result.cpp
+│
+├─ MATLAB_plot/
+│  ├─ plot_all.m
+│  ├─ plot_mesh.m
+│  ├─ plot_deformation.m
+│  ├─ plot_stress.m
+│  ├─ plot_summary_ratio.m
+│  ├─ plot_summary_solver.m
+│  └─ plot_summary_time.m
+│
+├─ output/
+│
+└─ read_me.md
+
+文件功能说明：
+
+1. fem_class.h / fem_class.cpp
+
+存放 MaterialParam、GeometryParam、MeshParam、LoadParam、SolverParam、SpeedParam、NodeInfo、ElementInfo、BoundaryEdge、GaussData、SolverInfo、ElementResult、CaseSummary、ModelData 等 class 和 struct。
+
+2. time_record.h / time_record.cpp
+
+实现 TimeRecord 计时类。
+
+3. sparse_matrix.h / sparse_matrix.cpp
+
+实现 SparseCOO、SparseCSR、COO 转 CSR、CSR 矩阵向量乘法、自由自由度子矩阵提取等。
+
+4. create_node.h / create_node.cpp
+
+专门处理节点信息创建、节点标记、节点编号、节点自由度编号。
+
+5. create_mesh.h / create_mesh.cpp
+
+在 C++ 中实现 1/2 板模型网格生成，不依赖 MATLAB。
+
+6. create_Jacobi.h / create_Jacobi.cpp
+
+计算 Q4 单元雅可比矩阵、detJ、invJ。
+
+7. create_B.h / create_B.cpp
+
+计算 Q4 单元形函数、形函数导数、B 矩阵。
+
+8. create_K.h / create_K.cpp
+
+计算单元刚度矩阵 Ke，组装 dense K、COO、CSR。
+
+9. boundary_condition.h / boundary_condition.cpp
+
+合并所有边界条件与载荷处理，包括固定边界、对称边界、均布载荷、自由自由度集合。
+
+10. calculate_result.h / calculate_result.cpp
+
+合并所有后处理计算，包括应变、应力、von Mises、最大应力统计、Kt 计算。
+
+11. solve_direct.h / solve_direct.cpp
+
+实现所有直接求解方案。
+
+12. solve_iterative.h / solve_iterative.cpp
+
+实现所有迭代求解方案。
+
+13. solve_algebra.h / solve_algebra.cpp
+
+实现 dense 和 sparse 通用数值代数基础函数。
+
+14. write_result.h / write_result.cpp
+
+输出所有 csv 和 txt 文件。
+
+15. MATLAB_plot
+
+读取 output 中的 csv 文件并绘图。
+
+16. read_me.md
+
+说明项目结构、编译方法、运行方法、输出文件含义、加速方案和结果分析方法。
+
+============================================================
+五、函数命名要求
+============================================================
+
+所有函数必须采用“动词_名词”的命名格式。
+
+例如：
+
+create_node
+create_mesh
+create_Gauss
+create_edof
+create_Jacobi
+create_B
+create_K_local
+create_K_global
+apply_boundary
+apply_load
+solve_direct
+solve_iterative
+calculate_result
+calculate_stress
+calculate_summary
+write_result
+check_mesh
+compare_solver
+print_summary
+
+不要使用过长、复杂、难以理解的函数名。
+
+变量命名要简明清楚，例如：
+
+L, H, E, nu, t, q, a, b, cx, cy, ratio
+node_id, elem_id
+n_node, n_elem, n_dof
+K, F, U
+Ke, B, D, J
+
+============================================================
+六、TimeRecord 计时器要求
+============================================================
+
+请新增计时器类：
+
+class TimeRecord {
+public:
+    void start_time(const string& name);
+    void stop_time(const string& name);
+    void add_time(const string& name, double seconds);
+    double get_time(const string& name) const;
+    void print_time() const;
+    void write_time(const string& filename, const string& mode) const;
+
+private:
+    map<string, double> time_table;
+    map<string, chrono::high_resolution_clock::time_point> start_table;
+};
+
+要求：
+
+1. 每个主要函数文件都必须调用 TimeRecord 计时。
+2. 不要在最底层小函数中频繁 start/stop，以免计时开销过大。
+3. 每个 ratio 单独输出 time_summary.csv。
+4. 所有 ratio 结束后，在 output 根目录输出 total_time_summary.csv。
+5. BOTH_MODE 下需要分别输出：
+   time_base.csv
+   time_fast.csv
+   time_compare.csv
+
+time_summary.csv 格式：
+
+step_name,time_seconds,mode
+
+step_name 至少包括：
+
+build_material
+build_geometry
+create_mesh_base
+create_mesh_fast
+check_mesh
+create_Gauss
+create_edof
+create_K_dense_base
+create_K_dense_fast
+create_K_sparse_coo
+convert_coo_to_csr
+apply_load
+apply_boundary_base
+apply_boundary_fast
+create_free_dof
+solve_direct_dense_full
+solve_direct_dense_block
+solve_direct_sparse_block_to_dense
+solve_cholesky_dense
+solve_jacobi_dense
+solve_gauss_seidel_dense
+solve_sor_dense
+solve_cg_dense
+solve_pcg_dense
+solve_jacobi_sparse
+solve_gauss_seidel_sparse
+solve_sor_sparse
+solve_cg_sparse
+solve_pcg_sparse
+calculate_result_base
+calculate_result_fast
+write_result_base
+write_result_fast
+compare_solver_result
+total_case_time
+
+============================================================
+七、1/2 板网格生成要求
+============================================================
+
+请在 C++ 的 create_mesh.cpp 中实现网格生成，不依赖 MATLAB。
+
+采用：
+
+上半椭圆孔 + 外相似椭圆加密带 + 外部过渡区域
+
+基本边界：
+
+1. 内边界：上半椭圆孔
+
+x = cx + a cos(theta)
+y = b sin(theta)
+theta ∈ [0, pi]
+
+2. 加密带外边界：上半相似椭圆
+
+x = cx + lambda * a * cos(theta)
+y = lambda * b * sin(theta)
+theta ∈ [0, pi]
+
+3. 外边界：上半矩形板边界
+
+x = 0
+x = L
+y = 0
+y = H/2
+
+优先采用射线法生成整个半域网格。
+
+对 theta ∈ [0, pi] 生成从椭圆孔边界向外发出的射线。
+
+每条射线的内点为：
+
+P_inner(theta) = [cx + a cos(theta), b sin(theta)]
+
+外相似椭圆点为：
+
+P_mid(theta) = [cx + lambda * a * cos(theta), lambda * b * sin(theta)]
+
+再从 P_mid 沿着从中心指向 P_mid 的方向延伸到上半矩形边界，得到 P_outer(theta)。
+
+P_outer 必须是该射线与上半矩形边界 x=0、x=L、y=H/2、y=0 的交点。
+
+特殊处理：
+
+theta = 0:
+P_outer = [L, 0]
+
+theta = pi:
+P_outer = [0, 0]
+
+对于中间 theta，P_outer 是射线与 x=0、x=L 或 y=H/2 的最近正向交点。
+
+径向分层：
+
+1. 从 P_inner 到 P_mid 生成 n_inner 层加密网格。
+2. 从 P_mid 到 P_outer 生成 n_outer 层过渡网格。
+
+总径向点数：
+
+n_radial = n_inner + n_outer + 1
+
+周向点数：
+
+n_theta + 1
+
+节点矩阵：
+
+node_grid[i_radial][i_theta]
+
+其中：
+
+i_radial = 0 表示孔边界。
+i_radial = n_inner 表示外相似椭圆。
+i_radial = n_inner + n_outer 表示外边界。
+i_theta = 0 对应右侧对称边界点。
+i_theta = n_theta 对应左侧对称边界点。
+
+生成单元：
+
+for i = 0 to n_radial - 2:
+    for j = 0 to n_theta - 1:
+        n1 = node_grid[i][j]
+        n2 = node_grid[i+1][j]
+        n3 = node_grid[i+1][j+1]
+        n4 = node_grid[i][j+1]
+
+检查单元方向，如果 detJ < 0，则交换节点顺序，使其为逆时针。
+
+节点标记要求：
+
+1. i_radial = 0:
+   flag_hole = 1
+
+2. i_radial = n_radial - 1 且 x 接近 0:
+   flag_left = 1
+
+3. i_radial = n_radial - 1 且 x 接近 L:
+   flag_right = 1
+
+4. i_radial = n_radial - 1 且 y 接近 H/2:
+   flag_top = 1
+
+5. theta = 0 且 x >= cx + a:
+   flag_sym = 1
+
+6. theta = pi 且 x <= cx - a:
+   flag_sym = 1
+
+对称边界包括：
+
+右侧底边：x ∈ [cx + a, L], y = 0
+左侧底边：x ∈ [0, cx - a], y = 0
+
+孔边界本身不施加对称约束。
+
+------------------------------------------------------------
+网格生成加速要求
+------------------------------------------------------------
+
+create_mesh.cpp 中需要实现基础版和加速版。
+
+基础版：
+
+void create_mesh_base(...);
+
+特点：
+
+1. 直接逐点生成节点。
+2. 逐单元生成 elements。
+3. 逐节点判断边界 flag。
+
+加速版：
+
+void create_mesh_fast(...);
+
+特点：
+
+1. 预先分配 vector 容量：
+
+nodes.reserve(n_radial * (n_theta + 1));
+elements.reserve((n_radial - 1) * n_theta);
+edges.reserve(估计边界边数量);
+
+2. 使用二维索引数组 node_grid。
+3. 避免重复查找节点。
+4. 节点编号直接由 i_radial 和 i_theta 映射：
+
+node_id = i_radial * (n_theta + 1) + i_theta
+
+5. 元素编号直接递增。
+6. 边界 flag 在生成节点时同步判断，避免后处理重复扫描。
+7. 预计算每个单元的 edof。
+
+统一接口：
+
+void create_mesh(...);
+
+根据 speed.use_fast_mesh 选择基础版或加速版。
+
+============================================================
+八、Q4 等参元理论实现要求
+============================================================
+
+四节点四边形等参元自然坐标为 xi, eta。
+
+形函数：
+
+N1 = 1/4 * (1 - xi) * (1 - eta)
+N2 = 1/4 * (1 + xi) * (1 - eta)
+N3 = 1/4 * (1 + xi) * (1 + eta)
+N4 = 1/4 * (1 - xi) * (1 + eta)
+
+雅可比矩阵：
+
+J =
+[ dx/dxi    dy/dxi
+  dx/deta   dy/deta ]
+
+detJ 必须大于 0。
+
+通过 invJ 得到：
+
+dN_dx
+dN_dy
+
+B 矩阵：
+
+B =
+[ dN1/dx    0       dN2/dx    0       dN3/dx    0       dN4/dx    0
+  0         dN1/dy  0         dN2/dy  0         dN3/dy  0         dN4/dy
+  dN1/dy    dN1/dx  dN2/dy    dN2/dx  dN3/dy    dN3/dx  dN4/dy    dN4/dx ]
+
+单元刚度矩阵：
+
+Ke = ∫ B^T D B t dΩ
+
+使用 2 × 2 高斯积分：
+
+xi = ±1 / sqrt(3)
+eta = ±1 / sqrt(3)
+
+权重均为 1。
+
+------------------------------------------------------------
+Q4 计算加速要求
+------------------------------------------------------------
+
+create_B.cpp 和 create_Jacobi.cpp 需要优化重复计算。
+
+加速策略：
+
+1. 预计算 2 × 2 高斯点处的：
+   xi
+   eta
+   weight
+   N
+   dN_dxi
+   dN_deta
+
+2. 在 main 或 create_K_global 前调用：
+
+create_Gauss(gauss_data);
+
+3. 后续 create_Jacobi 和 create_B 直接使用 gauss_data，不重复计算自然坐标形函数导数。
+
+4. 小矩阵优先使用固定大小数组：
+
+double Ke[8][8];
+double B[3][8];
+double J[2][2];
+double invJ[2][2];
+
+5. 避免在单元循环内频繁创建 vector。
+6. 避免在单元循环内 new/delete。
+7. 避免重复计算材料矩阵 D。
+
+函数要求：
+
+void create_Gauss(...);
+void create_Jacobi_base(...);
+void create_Jacobi_fast(...);
+void create_B_base(...);
+void create_B_fast(...);
+
+注意：
+
+create_Jacobi 和 create_B 在单元循环中会被多次调用，不要每次调用都单独写文件计时。应在 create_K_local 或 create_K_global 外层统一计时。
+
+============================================================
+九、总体刚度矩阵组装要求
+============================================================
+
+每个节点两个自由度：
+
+u, v
+
+如果节点编号从 0 开始：
+
+dof_u = 2 * node_id
+dof_v = 2 * node_id + 1
+
+每个单元自由度：
+
+edof = [u1, v1, u2, v2, u3, v3, u4, v4]
+
+组装：
+
+K[edof[i]][edof[j]] += Ke[i][j]
+
+------------------------------------------------------------
+总体刚度矩阵组装的多方案要求
+------------------------------------------------------------
+
+create_K.cpp 中需要同时实现以下方案，并提供切换接口：
+
+1. dense 基础装配
+
+函数：
+
+void create_K_dense_base(...);
+
+特点：
+
+使用 vector<double> K_dense。
+矩阵访问方式：
+
+K[i * n_dof + j]
+
+2. dense 加速装配
+
+函数：
+
+void create_K_dense_fast(...);
+
+加速点：
+
+预计算 edof。
+预分配 K_dense。
+固定小矩阵用数组。
+减少临时变量。
+可选 OpenMP 并行计算单元 Ke，但 dense 全局写入需避免数据竞争。
+
+3. COO 装配 + CSR 转换
+
+函数：
+
+void create_K_sparse_coo(...);
+void convert_coo_csr(...);
+
+加速点：
+
+使用 COO 存储每个单元的 8 × 8 贡献。
+每个单元最多贡献 64 个矩阵项。
+提前 reserve：
+
+coo.data.reserve(n_elem * 64);
+
+最后转换为 CSR。
+
+4. 并行 COO 装配
+
+函数：
+
+void create_K_sparse_parallel(...);
+
+要求：
+
+如果 use_parallel_loop = true 且启用 OpenMP：
+
+每个线程使用局部 COO。
+线程结束后合并所有局部 COO。
+不允许多个线程直接写同一个全局矩阵位置。
+
+5. 统一接口：
+
+void create_K_global(...);
+
+根据 speed.matrix_mode、speed.assemble_mode、speed.use_sparse_matrix、speed.use_fast_assemble 选择执行方案。
+
+输出计时：
+
+create_K_dense_base
+create_K_dense_fast
+create_K_sparse_coo
+create_K_sparse_parallel
+convert_coo_to_csr
+
+============================================================
+十、稀疏矩阵要求
+============================================================
+
+新增 sparse_matrix.h / sparse_matrix.cpp。
+
+实现两种稀疏格式。
+
+------------------------------------------------------------
+1. COO 格式
+------------------------------------------------------------
+
+struct CooEntry {
+    int row;
+    int col;
+    double value;
+};
+
+class SparseCOO {
+public:
+    int n_row;
+    int n_col;
+    vector<CooEntry> data;
+
+    void add_value(int row, int col, double value);
+    void clear_data();
+};
+
+COO 用于快速装配。
+
+------------------------------------------------------------
+2. CSR 格式
+------------------------------------------------------------
+
+class SparseCSR {
+public:
+    int n_row;
+    int n_col;
+    vector<int> row_ptr;
+    vector<int> col_id;
+    vector<double> val;
+    vector<int> diag_pos;
+
+    void multiply_vector(const vector<double>& x, vector<double>& y) const;
+    void create_diag_pos();
+};
+
+CSR 用于矩阵向量乘法和迭代求解。
+
+------------------------------------------------------------
+3. COO 转 CSR
+------------------------------------------------------------
+
+函数：
+
+void convert_coo_csr(const SparseCOO& coo, SparseCSR& csr);
+
+要求：
+
+1. 将相同 row、col 的重复项合并。
+2. 对每一行的列号排序。
+3. 输出非零元数量 nnz。
+4. 输出稀疏率 sparse_rate。
+5. 建立 diag_pos。
+
+稀疏率：
+
+sparse_rate = nnz / (n_dof * n_dof)
+
+输出到 check_info.txt。
+
+============================================================
+十一、边界条件和载荷要求
+============================================================
+
+boundary_condition.cpp 中合并所有边界条件和载荷函数。
+
+需要实现：
+
+1. apply_fixed_boundary
+
+对 flag_left = 1 的节点：
+
+u = 0
+v = 0
+
+2. apply_symmetry_boundary
+
+对 flag_sym = 1 的节点：
+
+v = 0
+
+注意：
+
+u 不约束。
+
+3. apply_traction_load
+
+对右端边界边施加均布拉伸载荷 q。
+
+只对 x = L 的边施加载荷。
+
+每条右边界边的两个端点各分配：
+
+Fx += q * le * t / 2
+
+4. create_dof_set
+
+生成：
+
+fixed_dof
+free_dof
+is_fixed
+
+5. apply_boundary_dense_base
+
+基础版 dense 置一法：
+
+对约束自由度逐个清行清列。
+Kii = 1。
+F_i = 已知位移。
+
+6. apply_boundary_dense_fast
+
+加速版 dense 置一法：
+
+先建立 constrained_dof 数组。
+使用 bool 或 char 数组 is_fixed 标记约束自由度。
+对所有约束自由度集中处理。
+减少重复扫描。
+
+7. apply_boundary_sparse
+
+稀疏模式下不直接修改 CSR 的行列。
+
+采用自由自由度子矩阵方法：
+
+根据 is_fixed 建立 free_dof。
+从 SparseCSR 中提取 Kff。
+从 F 中提取 Ff。
+求解 Kff Uf = Ff。
+回填完整 U。
+
+8. apply_boundary
+
+统一接口，根据矩阵类型和加速开关选择。
+
+9. check_total_load
+
+检查实际总载荷是否接近：
+
+q * (H/2) * t
+
+============================================================
+十二、直接求解器要求
+============================================================
+
+solve_direct.cpp 中实现所有直接法，并提供统一切换接口。
+
+有限元方程：
+
+K U = F
+
+直接法至少实现以下方案。
+
+------------------------------------------------------------
+1. 完整 dense 矩阵高斯消元
+------------------------------------------------------------
+
+函数：
+
+solve_direct_dense_full
+
+特点：
+
+使用完整矩阵置一法后的 K_dense。
+使用带部分主元的高斯消元法。
+
+输出 method：
+
+direct_dense_full
+
+------------------------------------------------------------
+2. dense 自由自由度子矩阵求解
+------------------------------------------------------------
+
+函数：
+
+solve_direct_dense_block
+
+特点：
+
+将自由度分为：
+
+free_dof
+fixed_dof
+
+提取：
+
+Kff
+Ff
+
+求解：
+
+Kff Uf = Ff
+
+再回填完整 U。
+
+输出 method：
+
+direct_dense_block
+
+------------------------------------------------------------
+3. sparse 自由自由度子矩阵转 dense 后求解
+------------------------------------------------------------
+
+函数：
+
+solve_direct_sparse_block_to_dense
+
+特点：
+
+从 SparseCSR 中提取自由自由度子矩阵 Kff。
+将 Kff 转为 dense。
+使用高斯消元或 Cholesky 求解。
+再回填完整 U。
+
+输出 method：
+
+direct_sparse_block_to_dense
+
+------------------------------------------------------------
+4. Cholesky 直接法
+------------------------------------------------------------
+
+函数：
+
+solve_cholesky_dense
+
+特点：
+
+如果矩阵对称正定，使用 Cholesky 分解求解。
+如果检测到非正定，则输出 warning，并跳过该求解器。
+
+输出 method：
+
+direct_cholesky_dense
+
+------------------------------------------------------------
+5. LDLT 直接法，可选
+------------------------------------------------------------
+
+函数：
+
+solve_ldlt_dense
+
+如果实现复杂，可以保留接口并在 read_me.md 中说明暂未启用。
+如果实现，则输出 method：
+
+direct_ldlt_dense
+
+------------------------------------------------------------
+6. 统一接口
+------------------------------------------------------------
+
+函数：
+
+void solve_direct(...);
+
+根据 SolverParam 中的开关运行所有直接法。
+
+输出 direct_solver_summary.csv：
+
+method,matrix_type,n_dof,n_solve_dof,time_seconds,final_residual,max_displacement
+
+============================================================
+十三、迭代求解器要求
+============================================================
+
+solve_iterative.cpp 中实现所有迭代法，并提供统一切换接口。
+
+统一收敛判据：
+
+res = ||K U - F|| / ||F||
+
+默认：
+
+tol = 1e-8
+max_iter = 200000
+
+------------------------------------------------------------
+1. Jacobi 迭代法
+------------------------------------------------------------
+
+实现：
+
+solve_jacobi_dense
+solve_jacobi_sparse
+
+说明：
+
+Jacobi 每次迭代只使用上一轮结果。
+dense 版本遍历 dense K。
+sparse 版本遍历 CSR 非零元。
+
+输出 method：
+
+jacobi_dense
+jacobi_sparse
+
+------------------------------------------------------------
+2. Gauss-Seidel 迭代法
+------------------------------------------------------------
+
+实现：
+
+solve_gauss_seidel_dense
+solve_gauss_seidel_sparse
+
+说明：
+
+Gauss-Seidel 使用当前轮已经更新的新值。
+CSR 中需要使用 diag_pos 定位对角元。
+
+输出 method：
+
+gauss_seidel_dense
+gauss_seidel_sparse
+
+------------------------------------------------------------
+3. SOR 超松弛迭代法
+------------------------------------------------------------
+
+实现：
+
+solve_sor_dense
+solve_sor_sparse
+
+需要扫描所有 omega：
+
+omega = 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9
+
+更新公式：
+
+U_new[i] = (1 - omega) * U_old[i] + omega * (F[i] - sum_offdiag) / Kii
+
+说明：
+
+omega = 1.0 时，SOR 退化为 Gauss-Seidel。
+omega 过大可能导致振荡或不收敛。
+
+输出 method：
+
+sor_dense
+sor_sparse
+
+------------------------------------------------------------
+4. CG 共轭梯度法
+------------------------------------------------------------
+
+实现：
+
+solve_cg_dense
+solve_cg_sparse
+
+说明：
+
+线弹性有限元刚度矩阵在正确施加边界条件后通常为对称正定矩阵，因此 CG 适合本问题。
+
+输出 method：
+
+cg_dense
+cg_sparse
+
+------------------------------------------------------------
+5. PCG 预条件共轭梯度法
+------------------------------------------------------------
+
+实现：
+
+solve_pcg_dense
+solve_pcg_sparse
+
+预条件采用 Jacobi 对角预条件：
+
+M = diag(K)
+
+要求：
+
+1. 提取矩阵对角线。
+2. 如果某个对角元过小，应输出 warning。
+3. 使用 M 的逆近似改善收敛。
+
+输出 method：
+
+pcg_dense
+pcg_sparse
+
+------------------------------------------------------------
+6. 统一接口
+------------------------------------------------------------
+
+函数：
+
+void solve_iterative(...);
+
+根据 SolverParam 中的开关运行所有迭代法。
+
+输出 iterative_solver_summary.csv：
+
+method,matrix_type,omega,converged,iterations,time_seconds,final_residual,max_displacement
+
+其中：
+
+Jacobi、GS、CG、PCG 的 omega 设为 0。
+SOR 的 omega 记录实际松弛因子。
+
+============================================================
+十四、数值代数函数要求
+============================================================
+
+solve_algebra.cpp 单独存放 dense 和 sparse 通用基础函数。
+
+dense 函数：
+
+double dot_vector(...)
+double norm_vector(...)
+void multiply_matrix_vector_dense(...)
+double calculate_residual_dense(...)
+void copy_matrix(...)
+void copy_vector(...)
+void zero_matrix(...)
+void zero_vector(...)
+void swap_row(...)
+double find_max_abs(...)
+double calculate_max_displacement(...)
+bool solve_gauss_dense(...)
+bool solve_cholesky_dense_core(...)
+
+sparse 函数：
+
+void multiply_matrix_vector_sparse(...)
+double calculate_residual_sparse(...)
+void get_diag_position(...)
+void extract_free_dof_sparse(...)
+void extract_free_dof_dense(...)
+void convert_sparse_to_dense_submatrix(...)
+void extract_diag_sparse(...)
+void extract_diag_dense(...)
+
+注意：
+
+1. 所有函数都要有中文注释。
+2. 底层小函数不要频繁计时。
+3. 上层求解过程整体计时。
+
+============================================================
+十五、后处理计算要求
+============================================================
+
+calculate_result.cpp 合并所有计算结果相关函数。
+
+需要实现：
+
+1. calculate_strain
+
+在单元中心 xi = 0, eta = 0 计算：
+
+epsilon = B * ue
+
+输出：
+
+epsilon_x
+epsilon_y
+gamma_xy
+
+2. calculate_stress
+
+sigma = D * epsilon
+
+输出：
+
+sigma_x
+sigma_y
+tau_xy
+
+3. calculate_von_mises
+
+平面应力 von Mises 应力：
+
+sigma_vm = sqrt(sigma_x^2 - sigma_x*sigma_y + sigma_y^2 + 3*tau_xy^2)
+
+4. calculate_result_base
+
+基础版：
+
+每个单元单独计算中心点 B。
+计算应变、应力、von Mises。
+写入结果数组。
+
+5. calculate_result_fast
+
+加速版：
+
+预先分配结果数组。
+复用中心点 GaussData。
+避免重复创建临时 vector。
+可以并行遍历单元。
+统计最大应力时先每个线程局部统计，最后合并。
+
+6. calculate_result
+
+统一接口，根据 speed.use_fast_post 和 stress_mode 选择。
+
+7. calculate_summary
+
+统计：
+
+max_ux
+max_uy
+max_umag
+max_sigma_x
+max_sigma_y
+max_tau_xy
+max_sigma_vm
+max_sigma_vm 对应单元编号
+max_sigma_vm 对应坐标
+Kt_x = max_sigma_x / q
+Kt_vm = max_sigma_vm / q
+
+------------------------------------------------------------
+后处理方式切换接口
+------------------------------------------------------------
+
+StressMode stress_mode = CENTER_STRESS;
+
+CENTER_STRESS：
+
+只在单元中心计算应力，速度快，默认使用。
+
+GAUSS_AVERAGE_STRESS：
+
+在 2 × 2 高斯点计算应力并取平均，结果更平滑，但计算量更大。
+
+BOTH_STRESS：
+
+两种都计算并计时比较。
+
+============================================================
+十六、I/O 输出加速要求
+============================================================
+
+write_result.cpp 中实现基础版和加速版。
+
+基础版：
+
+write_result_base
+
+使用 ofstream 逐行输出。
+
+加速版：
+
+write_result_fast
+
+要求：
+
+1. 使用 ostringstream 先构造大块字符串。
+2. 再一次性写入文件。
+3. 对大型 csv 文件减少频繁 I/O。
+4. 输出时固定精度：
+
+setprecision(12)
+
+5. 不要在循环中频繁使用 endl，统一使用 '\n'。
+
+统一接口：
+
+write_result
+
+根据 speed.use_fast_io 选择基础版或加速版。
+
+计时输出：
+
+write_nodes
+write_elements
+write_displacement
+write_stress
+write_summary
+write_solver_summary
+write_time_summary
+write_result_total
+
+============================================================
+十七、结果输出文件要求
+============================================================
+
+每个 ratio 单独输出一个文件夹：
+
+output/
+│
+├─ ratio_1/
+├─ ratio_2/
+├─ ratio_3/
+├─ ratio_4/
+└─ ratio_5/
+
+每个文件夹内输出：
+
+1. nodes.csv
+
+格式：
+
+node_id,x,y,flag_left,flag_right,flag_top,flag_sym,flag_hole
+
+2. elements.csv
+
+格式：
+
+elem_id,n1,n2,n3,n4
+
+3. displacement.csv
+
+格式：
+
+node_id,x,y,ux,uy,umag
+
+4. strain.csv
+
+格式：
+
+elem_id,x_center,y_center,epsilon_x,epsilon_y,gamma_xy
+
+5. stress.csv
+
+格式：
+
+elem_id,x_center,y_center,sigma_x,sigma_y,tau_xy,sigma_vm
+
+6. direct_solver_summary.csv
+
+格式：
+
+method,matrix_type,n_dof,n_solve_dof,time_seconds,final_residual,max_displacement
+
+7. iterative_solver_summary.csv
+
+格式：
+
+method,matrix_type,omega,converged,iterations,time_seconds,final_residual,max_displacement
+
+8. case_summary.csv
+
+格式：
+
+ratio,a,b,max_ux,max_uy,max_umag,max_sigma_x,max_sigma_y,max_tau_xy,max_sigma_vm,Kt_x,Kt_vm
+
+9. time_summary.csv
+
+格式：
+
+step_name,time_seconds,mode
+
+10. check_info.txt
+
+输出：
+
+L
+H
+a
+b
+ratio
+节点数
+单元数
+自由度数
+左端约束自由度数
+对称边界约束自由度数
+右端载荷边数量
+实际总外力
+理论半模型总外力 q*(H/2)*t
+最小 detJ
+最大 detJ
+是否存在 detJ <= 0
+dense 矩阵规模
+sparse 非零元数 nnz
+sparse_rate
+是否成功求解
+warning 信息
+
+全部工况结束后，在 output 根目录输出：
+
+1. summary_ratio.csv
+
+汇总所有 ratio 的最大应力、最大位移、Kt。
+
+2. summary_solver.csv
+
+汇总所有 ratio 的求解器对比结果。
+
+3. summary_time.csv
+
+汇总所有 ratio 的耗时。
+
+4. compare_base_fast.csv
+
+格式：
+
+ratio,n_node,n_elem,error_U,error_stress,error_Kt_vm,time_base,time_fast,speedup
+
+5. compare_solver_result.csv
+
+格式：
+
+ratio,method_ref,method_compare,error_U,error_max_disp,error_residual
+
+============================================================
+十八、结果正确性对比要求
+============================================================
+
+当 run_mode = BOTH_MODE 时，需要同时运行基础版本和加速版本。
+
+要求对比：
+
+1. 节点数量是否一致。
+2. 单元数量是否一致。
+3. 最大位移误差。
+4. 最大应力误差。
+5. Kt_vm 误差。
+6. 直接法结果与迭代法结果的位移误差。
+7. dense 结果与 sparse 结果的位移误差。
+8. center stress 与 gauss average stress 的最大应力差异。
+
+误差计算：
+
+error_U = ||U_base - U_fast|| / ||U_base||
+
+error_stress = max_abs(stress_base - stress_fast) / max_abs(stress_base)
+
+speedup = time_base / time_fast
+
+如果误差超过 1e-6，需要在 check_info.txt 中给出 warning。
+
+============================================================
+十九、MATLAB 可视化脚本要求
+============================================================
+
+虽然网格生成和有限元计算都在 C++ 中完成，但请额外生成 MATLAB 可视化脚本，用于读取 C++ 输出的 csv 文件并画图。
+
+MATLAB 文件放在：
+
+MATLAB_plot/
+│
+├─ plot_all.m
+├─ plot_mesh.m
+├─ plot_deformation.m
+├─ plot_stress.m
+├─ plot_summary_ratio.m
+├─ plot_summary_solver.m
+└─ plot_summary_time.m
+
+MATLAB 只负责读取 output 中的数据并绘图，不参与计算。
+
+需要画：
+
+对每个 ratio：
+
+1. 网格图
+2. 变形图
+3. sigma_x 云图
+4. sigma_y 云图
+5. tau_xy 云图
+6. von Mises 应力云图
+
+所有 ratio 汇总图：
+
+1. max_sigma_vm_vs_ratio.png
+2. Kt_vm_vs_ratio.png
+3. direct_solver_time_compare.png
+4. iterative_solver_iteration_compare.png
+5. sor_omega_compare.png
+6. cg_pcg_compare.png
+7. dense_sparse_time_compare.png
+8. base_fast_speedup_compare.png
+9. step_time_pie_or_bar.png
+
+绘图要求：
+
+1. 使用 patch 绘制四边形单元云图。
+2. axis equal。
+3. 带 colorbar。
+4. 标题中注明 ratio、a、b。
+5. 保存为 png。
+6. 变形图使用放大系数 scale，默认 scale = 20，可在脚本开头修改。
+7. 求解器对比图需要区分不同 method。
+8. SOR 图横坐标为 omega，纵坐标为迭代次数或耗时。
+9. CG/PCG 图对比迭代次数和耗时。
+10. time 图展示每一步有限元实现过程的时间占比。
+
+============================================================
+二十、read_me.md 要求
+============================================================
+
+请生成 read_me.md，内容包括：
+
+1. 项目功能说明。
+2. 为什么采用 1/2 板模型，而不是 1/4 板模型。
+3. 1/2 板模型的边界条件。
+4. 椭圆孔面积保持不变的计算方法。
+5. Q4 等参元基本理论。
+6. 程序文件结构说明。
+7. 编译方法。
+8. 运行方法。
+9. 输出文件说明。
+10. MATLAB 可视化方法。
+11. 结果分析建议。
+12. 加分项：Jacobi、Gauss-Seidel、SOR 迭代法效率比较。
+13. 额外加速项：CG、PCG、稀疏矩阵、自由自由度缩减、并行、预计算、快速 I/O。
+14. 基础版本和加速版本的区别。
+15. dense matrix 与 sparse matrix 的区别。
+16. COO 用于装配、CSR 用于矩阵向量乘法和迭代求解的原因。
+17. 为什么自由自由度子矩阵求解比完整置一法更快。
+18. 为什么有限元总体刚度矩阵适合稀疏存储。
+19. 如何根据 time_summary.csv 分析程序瓶颈。
+20. 如何根据 compare_base_fast.csv 说明加速效果。
+21. 如何解释不同 b/a 下孔边应力集中变化。
+22. 如何解释不同求解器效率差异。
+
+编译命令示例：
+
+g++ main.cpp fem_class.cpp time_record.cpp sparse_matrix.cpp create_node.cpp create_mesh.cpp create_Jacobi.cpp create_B.cpp create_K.cpp boundary_condition.cpp calculate_result.cpp solve_direct.cpp solve_iterative.cpp solve_algebra.cpp write_result.cpp -o fem_q4_half.exe -O2 -std=c++11
+
+如果启用 OpenMP：
+
+g++ main.cpp fem_class.cpp time_record.cpp sparse_matrix.cpp create_node.cpp create_mesh.cpp create_Jacobi.cpp create_B.cpp create_K.cpp boundary_condition.cpp calculate_result.cpp solve_direct.cpp solve_iterative.cpp solve_algebra.cpp write_result.cpp -o fem_q4_half.exe -O2 -std=c++11 -fopenmp -DUSE_OPENMP
+
+运行：
+
+./fem_q4_half.exe
+
+Windows 下：
+
+fem_q4_half.exe
+
+MATLAB 绘图：
+
+cd MATLAB_plot
+plot_all
+
+============================================================
+二十一、结果分析逻辑要求
+============================================================
+
+请在 read_me.md 和必要注释中说明以下分析逻辑：
+
+1. 当 b/a = 1 时，椭圆孔退化为圆孔，孔边应力集中相对对称。
+2. 当 b/a 增大时，孔洞越来越细长。
+3. 由于孔洞面积保持不变，b/a 增大时：
+
+a = R0 / sqrt(b/a) 减小
+b = R0 * sqrt(b/a) 增大
+
+4. 孔边局部曲率变化导致应力流线更强烈弯曲。
+5. 孔边最大应力通常随 b/a 增大而增大。
+6. 应力云图中高应力区会逐渐向曲率较大的孔边区域集中。
+7. Jacobi 方法一般最慢。
+8. Gauss-Seidel 利用当前轮新值，通常比 Jacobi 快。
+9. SOR 在合适 omega 下最快，但 omega 过大可能导致不收敛。
+10. CG 对对称正定矩阵通常比 Jacobi、GS、SOR 更高效。
+11. PCG 通过对角预条件改善收敛速度，通常比 CG 更稳定或更快。
+12. dense 矩阵适合小规模问题，稀疏矩阵适合较大规模有限元问题。
+13. 自由自由度缩减能减少求解规模，因此比完整置一法更快。
+14. 高斯点预计算、edof 预计算、vector reserve、固定小数组、快速 I/O 都能减少重复开销。
+15. OpenMP 并行适合单元刚度计算和后处理，但全局装配要避免数据竞争。
+
+============================================================
+二十二、代码质量要求
+============================================================
+
+1. 所有代码必须完整，不要只给伪代码。
+2. 所有函数必须可以直接编译。
+3. 不依赖第三方 C++ 库。
+4. 使用 vector 管理主要数组。
+5. 小型固定矩阵优先使用普通数组。
+6. 尽量使用清晰的 class 和函数接口。
+7. 关键位置写中文注释。
+8. 所有可调参数集中在 main 函数开头。
+9. 函数命名采用“动词_名词”格式。
+10. 参数命名简明清楚。
+11. 对文件打开、矩阵奇异、detJ 非正、迭代不收敛、Cholesky 非正定等情况做错误检查。
+12. 保留调试输出，方便截图提交。
+13. 输出计算耗时，方便完成附加题效率讨论。
+14. 如果某个可选算法实现失败或不适用，应输出 warning，而不是直接崩溃。
+15. 如果代码较长，可以分批输出，但每个文件必须完整，不能省略函数主体。
+
+============================================================
+二十三、最终输出要求
+============================================================
+
+请一次性生成完整项目代码，包括：
+
+1. main.cpp
+2. fem_class.h / fem_class.cpp
+3. time_record.h / time_record.cpp
+4. sparse_matrix.h / sparse_matrix.cpp
+5. create_node.h / create_node.cpp
+6. create_mesh.h / create_mesh.cpp
+7. create_Jacobi.h / create_Jacobi.cpp
+8. create_B.h / create_B.cpp
+9. create_K.h / create_K.cpp
+10. boundary_condition.h / boundary_condition.cpp
+11. calculate_result.h / calculate_result.cpp
+12. solve_direct.h / solve_direct.cpp
+13. solve_iterative.h / solve_iterative.cpp
+14. solve_algebra.h / solve_algebra.cpp
+15. write_result.h / write_result.cpp
+16. MATLAB_plot 中的所有绘图脚本
+17. read_me.md
+
+如果一次回答太长，可以分批输出，但每个文件必须是完整代码，不能省略函数主体。
+
+============================================================
+二十四、必须强调
+============================================================
+
+1. 基础版本和加速版本必须共存。
+2. 所有加速方案必须通过 main 函数开头参数选择。
+3. 如果某一过程有多个方案，例如迭代法有 Jacobi、Gauss-Seidel、SOR、CG、PCG，则所有方案都要写出来。
+4. 所有求解方案都要分别计时。
+5. 所有求解方案都要输出残差、迭代次数、最大位移。
+6. 所有主要函数文件都要有计时统计。
+7. 每个 ratio 都要输出详细耗时。
+8. 稀疏矩阵至少用于总体刚度矩阵存储和迭代法求解。
+9. 直接法至少要实现完整矩阵直接求解和自由自由度子矩阵求解。
+10. 迭代法至少要实现 Jacobi、Gauss-Seidel、SOR。
+11. 额外实现 CG 和 PCG 作为加速迭代法。
+12. BOTH_MODE 下必须输出基础版和加速版的时间对比、误差对比和加速比。
+13. 不要只给伪代码，必须给可以直接编译运行的完整代码。
+```

@@ -479,6 +479,22 @@ struct SolverInfo {
 };
 
 // ============================================================
+// 12.1 迭代法残差历史
+// ============================================================
+// 用于补充绘制：残差-迭代步曲线、残差-时间曲线。
+struct IterHistory {
+    std::string method;
+    std::string matrix_type;
+    double omega;
+
+    std::vector<int> iteration;
+    std::vector<double> residual;
+    std::vector<double> time_seconds;
+
+    IterHistory() : method(""), matrix_type(""), omega(0.0) {}
+};
+
+// ============================================================
 // 13. 单元后处理结果
 // ============================================================
 
@@ -623,6 +639,9 @@ public:
     std::vector<SolverInfo> direct_solver_info;
     std::vector<SolverInfo> iterative_solver_info;
     std::vector<SolverInfo> all_solver_info;
+
+    // 迭代残差历史，用于 MATLAB 绘制 residual-iteration / residual-time 曲线。
+    std::vector<IterHistory> iterative_history;
 
     // ------------------------------
     // 工况汇总

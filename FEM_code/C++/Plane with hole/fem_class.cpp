@@ -575,6 +575,7 @@ void ModelData::clear_data()
     direct_solver_info.clear();
     iterative_solver_info.clear();
     all_solver_info.clear();
+    iterative_history.clear();
 
     summary = CaseSummary();
 

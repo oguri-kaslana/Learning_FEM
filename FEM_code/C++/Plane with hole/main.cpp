@@ -21,6 +21,7 @@ using namespace std;
 // 4. 输出单工况结果和全部工况汇总结果。
 // ============================================================
 
+//生成输出文件路径
 static string join_path_main(const string& dir, const string& name)
 {
     if (dir.empty()) return name;
@@ -29,6 +30,7 @@ static string join_path_main(const string& dir, const string& name)
     return dir + "/" + name;
 }
 
+//根据椭圆轴比ratio生成对应输出文件名称
 static string make_ratio_folder(double ratio)
 {
     ostringstream ss;
@@ -36,16 +38,22 @@ static string make_ratio_folder(double ratio)
     return ss.str();
 }
 
+//搜索关键词, 输出不同算法运行的时间
 static double sum_time_by_keyword(const TimeRecord& timer, const string& keyword)
 {
     double total = 0.0;
     const map<string, double>& table = timer.get_table();
-    for (map<string, double>::const_iterator it = table.begin(); it != table.end(); ++it) {
-        if (it->first.find(keyword) != string::npos) total += it->second;
+
+    for (const auto& item : table) {
+        if (item.first.find(keyword) != string::npos) {
+            total += item.second;
+        }
     }
+
     return total;
 }
 
+// 生成对比结果
 static CompareBaseFast create_compare_base_fast(const ModelData& model,
                                                 const TimeRecord& timer,
                                                 double ratio)
@@ -55,8 +63,6 @@ static CompareBaseFast create_compare_base_fast(const ModelData& model,
     info.n_node = model.n_node;
     info.n_elem = model.n_elem;
 
-    // 当前工程基础版和加速版共用同一套最终结果数据，
-    // 因此这里主要比较耗时；结果误差在需要时可通过保存两套 U 和 stress 后进一步扩展。
     info.error_U = 0.0;
     info.error_stress = 0.0;
     info.error_Kt_vm = 0.0;
@@ -69,6 +75,7 @@ static CompareBaseFast create_compare_base_fast(const ModelData& model,
     return info;
 }
 
+// 生成求解器结果对比信息
 static void create_compare_solver_result(const ModelData& model,
                                          double ratio,
                                          vector<CompareSolverResult>& compare_infos)
@@ -103,7 +110,7 @@ static void create_compare_solver_result(const ModelData& model,
         compare_infos.push_back(c);
     }
 }
-
+// 统计总耗时
 static void append_time_summary(const TimeRecord& timer,
                                 double ratio,
                                 vector<pair<string, double> >& time_infos)
@@ -116,6 +123,7 @@ static void append_time_summary(const TimeRecord& timer,
     }
 }
 
+// 防止卡死
 static void apply_large_problem_safety(SolverParam& solver,
                                        int n_dof_est,
                                        bool auto_skip_expensive_solver,
@@ -156,7 +164,7 @@ int main()
     cout << "============================================================" << endl;
 
     // ========================================================
-    // 一、所有可调参数集中放在 main 函数开头
+    // 一、可调参数
     // ========================================================
 
     // ---------------- 几何参数 ----------------
@@ -173,10 +181,10 @@ int main()
     double q = 1.0;        // 右端均布拉伸载荷，单位 MPa = N/mm^2
 
     // ---------------- 网格参数 ----------------
-    int n_theta = 96;      // 上半椭圆周向分段数，必须为偶数
-    int n_inner = 8;       // 孔边到外相似椭圆加密层数
-    int n_outer = 12;      // 外相似椭圆到矩形边界过渡层数
-    double lambda = 1.8;   // 外相似椭圆放大系数
+    int n_theta = 64;      // TFI 周向总分段数，必须能被 4 整除
+    int n_inner = 8;       // TFI 径向分段的一部分；与 n_outer 相加得到 n_eta
+    int n_outer = 16;      // TFI 径向分段的一部分；n_eta = n_inner + n_outer，推荐总数约 24
+    double lambda = 1.8;   // TFI 网格中保留该参数用于兼容旧接口，实际不再控制外相似椭圆
 
     // ---------------- 求解参数 ----------------
     double tol = 1.0e-8;
@@ -233,9 +241,8 @@ int main()
     bool run_cg_sparse = true;
     bool run_pcg_sparse = true;
 
-    // 对大网格自动跳过极慢求解器，避免默认参数直接运行时间过长。
-    // 如果必须严格运行全部求解器，把 auto_skip_expensive_solver 改为 false。
-    bool auto_skip_expensive_solver = true;
+ 
+    bool auto_skip_expensive_solver = false;   // TFI 正式网格自由度较大，默认跳过高耗时求解器，避免程序卡死
     int expensive_dof_limit = 1500;
 
     // ---------------- 计时精度 ----------------

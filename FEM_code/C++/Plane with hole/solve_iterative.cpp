@@ -60,6 +60,55 @@ static void finish_iter(ModelData& model,
     model.all_solver_info.push_back(info);
 }
 
+static void record_iter_history(IterHistory* hist,
+                                int iter,
+                                double residual,
+                                const chrono::high_resolution_clock::time_point& t0)
+{
+    if (hist == NULL) return;
+
+    // 前 200 步全部记录，之后每 10 步记录一次；最终收敛步由外层调用补充。
+    // 这样既能画出曲线，又避免 Jacobi / GS / SOR 产生过大的 csv 文件。
+    if (iter <= 200 || iter % 10 == 0) {
+        const auto now = chrono::high_resolution_clock::now();
+        const double t = chrono::duration<double>(now - t0).count();
+        hist->iteration.push_back(iter);
+        hist->residual.push_back(residual);
+        hist->time_seconds.push_back(t);
+    }
+}
+
+static void record_iter_final(IterHistory* hist,
+                              int iter,
+                              double residual,
+                              const chrono::high_resolution_clock::time_point& t0)
+{
+    if (hist == NULL) return;
+    if (!hist->iteration.empty() && hist->iteration.back() == iter) return;
+    const auto now = chrono::high_resolution_clock::now();
+    const double t = chrono::duration<double>(now - t0).count();
+    hist->iteration.push_back(iter);
+    hist->residual.push_back(residual);
+    hist->time_seconds.push_back(t);
+}
+
+static void init_iter_history(IterHistory& hist, const SolverInfo& info)
+{
+    hist.method = info.method;
+    hist.matrix_type = info.matrix_type;
+    hist.omega = info.omega;
+    hist.iteration.clear();
+    hist.residual.clear();
+    hist.time_seconds.clear();
+}
+
+static void push_iter_history(ModelData& model, const IterHistory& hist)
+{
+    if (!hist.iteration.empty()) {
+        model.iterative_history.push_back(hist);
+    }
+}
+
 static bool iterate_jacobi_dense_core(const vector<double>& A,
                                       const vector<double>& b,
                                       int n,
@@ -67,10 +116,12 @@ static bool iterate_jacobi_dense_core(const vector<double>& A,
                                       int max_iter,
                                       vector<double>& x,
                                       int& iter,
-                                      double& res)
+                                      double& res,
+                                      IterHistory* hist)
 {
     x.assign(n, 0.0);
     vector<double> x_old(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
 
     for (iter = 1; iter <= max_iter; ++iter) {
         for (int i = 0; i < n; ++i) {
@@ -83,9 +134,11 @@ static bool iterate_jacobi_dense_core(const vector<double>& A,
             x[i] = s / diag;
         }
         res = calculate_residual_dense(A, x, b, n);
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
         x_old.swap(x);
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -97,9 +150,11 @@ static bool iterate_gs_dense_core(const vector<double>& A,
                                   double omega,
                                   vector<double>& x,
                                   int& iter,
-                                  double& res)
+                                  double& res,
+                                  IterHistory* hist)
 {
     x.assign(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
     for (iter = 1; iter <= max_iter; ++iter) {
         for (int i = 0; i < n; ++i) {
             double diag = A[static_cast<size_t>(i) * n + i];
@@ -112,9 +167,11 @@ static bool iterate_gs_dense_core(const vector<double>& A,
             x[i] = (1.0 - omega) * x[i] + omega * x_gs;
         }
         res = calculate_residual_dense(A, x, b, n);
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
         if (!isfinite(res) || res > 1.0e80) return false;
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -126,9 +183,11 @@ static bool iterate_cg_dense_core(const vector<double>& A,
                                   bool use_pcg,
                                   vector<double>& x,
                                   int& iter,
-                                  double& res)
+                                  double& res,
+                                  IterHistory* hist)
 {
     x.assign(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
     vector<double> r = b;
     vector<double> z(n, 0.0), p(n, 0.0), Ap(n, 0.0), diag(n, 1.0);
 
@@ -147,7 +206,8 @@ static bool iterate_cg_dense_core(const vector<double>& A,
     double rz_old = dot_vector(r, z);
     const double nb = max(1.0e-30, norm_vector(b));
     res = norm_vector(r) / nb;
-    if (res < tol) { iter = 0; return true; }
+    record_iter_history(hist, 0, res, t0);
+    if (res < tol) { iter = 0; record_iter_final(hist, iter, res, t0); return true; }
 
     for (iter = 1; iter <= max_iter; ++iter) {
         multiply_matrix_vector_dense(A, p, Ap, n);
@@ -161,7 +221,8 @@ static bool iterate_cg_dense_core(const vector<double>& A,
         }
 
         res = norm_vector(r) / nb;
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
 
         if (use_pcg) {
             for (int i = 0; i < n; ++i) z[i] = r[i] / diag[i];
@@ -174,6 +235,7 @@ static bool iterate_cg_dense_core(const vector<double>& A,
         for (int i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
         rz_old = rz_new;
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -183,11 +245,13 @@ static bool iterate_jacobi_sparse_core(const SparseCSR& A,
                                        int max_iter,
                                        vector<double>& x,
                                        int& iter,
-                                       double& res)
+                                       double& res,
+                                       IterHistory* hist)
 {
     const int n = A.n_row;
     x.assign(n, 0.0);
     vector<double> x_old(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
     vector<double> diag(n, 0.0);
     extract_diag_sparse(A, diag);
 
@@ -202,9 +266,11 @@ static bool iterate_jacobi_sparse_core(const SparseCSR& A,
             x[i] = s / diag[i];
         }
         res = calculate_residual_sparse(A, x, b);
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
         x_old.swap(x);
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -215,10 +281,12 @@ static bool iterate_gs_sparse_core(const SparseCSR& A,
                                    double omega,
                                    vector<double>& x,
                                    int& iter,
-                                   double& res)
+                                   double& res,
+                                   IterHistory* hist)
 {
     const int n = A.n_row;
     x.assign(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
     for (iter = 1; iter <= max_iter; ++iter) {
         for (int i = 0; i < n; ++i) {
             const int diag_pos = (i < static_cast<int>(A.diag_pos.size()) ? A.diag_pos[i] : -1);
@@ -232,9 +300,11 @@ static bool iterate_gs_sparse_core(const SparseCSR& A,
             x[i] = (1.0 - omega) * x[i] + omega * x_gs;
         }
         res = calculate_residual_sparse(A, x, b);
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
         if (!isfinite(res) || res > 1.0e80) return false;
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -245,10 +315,12 @@ static bool iterate_cg_sparse_core(const SparseCSR& A,
                                    bool use_pcg,
                                    vector<double>& x,
                                    int& iter,
-                                   double& res)
+                                   double& res,
+                                   IterHistory* hist)
 {
     const int n = A.n_row;
     x.assign(n, 0.0);
+    const auto t0 = chrono::high_resolution_clock::now();
     vector<double> r = b;
     vector<double> z(n, 0.0), p(n, 0.0), Ap(n, 0.0), diag(n, 1.0);
 
@@ -267,7 +339,8 @@ static bool iterate_cg_sparse_core(const SparseCSR& A,
     double rz_old = dot_vector(r, z);
     const double nb = max(1.0e-30, norm_vector(b));
     res = norm_vector(r) / nb;
-    if (res < tol) { iter = 0; return true; }
+    record_iter_history(hist, 0, res, t0);
+    if (res < tol) { iter = 0; record_iter_final(hist, iter, res, t0); return true; }
 
     for (iter = 1; iter <= max_iter; ++iter) {
         A.multiply_vector(p, Ap);
@@ -281,7 +354,8 @@ static bool iterate_cg_sparse_core(const SparseCSR& A,
         }
 
         res = norm_vector(r) / nb;
-        if (res < tol) return true;
+        record_iter_history(hist, iter, res, t0);
+        if (res < tol) { record_iter_final(hist, iter, res, t0); return true; }
 
         if (use_pcg) {
             for (int i = 0; i < n; ++i) z[i] = r[i] / diag[i];
@@ -294,6 +368,7 @@ static bool iterate_cg_sparse_core(const SparseCSR& A,
         for (int i = 0; i < n; ++i) p[i] = z[i] + beta * p[i];
         rz_old = rz_new;
     }
+    record_iter_final(hist, iter > max_iter ? max_iter : iter, res, t0);
     return false;
 }
 
@@ -306,11 +381,14 @@ SolverInfo solve_jacobi_dense(ModelData& model, const SolverParam& solver, TimeR
     double res = 1.0e100;
     prepare_dense_free(model, A, b, n);
     SolverInfo info = make_iter_info("jacobi_dense", "dense", 0.0, model.n_dof, n);
-    info.converged = iterate_jacobi_dense_core(A, b, n, solver.tol, solver.max_iter, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_jacobi_dense_core(A, b, n, solver.tol, solver.max_iter, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -324,11 +402,14 @@ SolverInfo solve_gauss_seidel_dense(ModelData& model, const SolverParam& solver,
     double res = 1.0e100;
     prepare_dense_free(model, A, b, n);
     SolverInfo info = make_iter_info("gauss_seidel_dense", "dense", 0.0, model.n_dof, n);
-    info.converged = iterate_gs_dense_core(A, b, n, solver.tol, solver.max_iter, 1.0, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_gs_dense_core(A, b, n, solver.tol, solver.max_iter, 1.0, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -342,11 +423,14 @@ SolverInfo solve_sor_dense(ModelData& model, const SolverParam& solver, double o
     double res = 1.0e100;
     prepare_dense_free(model, A, b, n);
     SolverInfo info = make_iter_info("sor_dense", "dense", omega, model.n_dof, n);
-    info.converged = iterate_gs_dense_core(A, b, n, solver.tol, solver.max_iter, omega, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_gs_dense_core(A, b, n, solver.tol, solver.max_iter, omega, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -360,11 +444,14 @@ SolverInfo solve_cg_dense(ModelData& model, const SolverParam& solver, TimeRecor
     double res = 1.0e100;
     prepare_dense_free(model, A, b, n);
     SolverInfo info = make_iter_info("cg_dense", "dense", 0.0, model.n_dof, n);
-    info.converged = iterate_cg_dense_core(A, b, n, solver.tol, solver.max_iter, false, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_cg_dense_core(A, b, n, solver.tol, solver.max_iter, false, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -378,11 +465,14 @@ SolverInfo solve_pcg_dense(ModelData& model, const SolverParam& solver, TimeReco
     double res = 1.0e100;
     prepare_dense_free(model, A, b, n);
     SolverInfo info = make_iter_info("pcg_dense", "dense", 0.0, model.n_dof, n);
-    info.converged = iterate_cg_dense_core(A, b, n, solver.tol, solver.max_iter, true, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_cg_dense_core(A, b, n, solver.tol, solver.max_iter, true, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -395,11 +485,14 @@ SolverInfo solve_jacobi_sparse(ModelData& model, const SolverParam& solver, Time
     SparseCSR A = prepare_sparse_free(model, b);
     int iter = 0; double res = 1.0e100;
     SolverInfo info = make_iter_info("jacobi_sparse", "sparse", 0.0, model.n_dof, A.n_row);
-    info.converged = iterate_jacobi_sparse_core(A, b, solver.tol, solver.max_iter, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_jacobi_sparse_core(A, b, solver.tol, solver.max_iter, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -413,11 +506,14 @@ SolverInfo solve_gauss_seidel_sparse(ModelData& model, const SolverParam& solver
     A.create_diag_pos();
     int iter = 0; double res = 1.0e100;
     SolverInfo info = make_iter_info("gauss_seidel_sparse", "sparse", 0.0, model.n_dof, A.n_row);
-    info.converged = iterate_gs_sparse_core(A, b, solver.tol, solver.max_iter, 1.0, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_gs_sparse_core(A, b, solver.tol, solver.max_iter, 1.0, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -431,11 +527,14 @@ SolverInfo solve_sor_sparse(ModelData& model, const SolverParam& solver, double 
     A.create_diag_pos();
     int iter = 0; double res = 1.0e100;
     SolverInfo info = make_iter_info("sor_sparse", "sparse", omega, model.n_dof, A.n_row);
-    info.converged = iterate_gs_sparse_core(A, b, solver.tol, solver.max_iter, omega, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_gs_sparse_core(A, b, solver.tol, solver.max_iter, omega, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -448,11 +547,14 @@ SolverInfo solve_cg_sparse(ModelData& model, const SolverParam& solver, TimeReco
     SparseCSR A = prepare_sparse_free(model, b);
     int iter = 0; double res = 1.0e100;
     SolverInfo info = make_iter_info("cg_sparse", "sparse", 0.0, model.n_dof, A.n_row);
-    info.converged = iterate_cg_sparse_core(A, b, solver.tol, solver.max_iter, false, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_cg_sparse_core(A, b, solver.tol, solver.max_iter, false, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }
@@ -465,11 +567,14 @@ SolverInfo solve_pcg_sparse(ModelData& model, const SolverParam& solver, TimeRec
     SparseCSR A = prepare_sparse_free(model, b);
     int iter = 0; double res = 1.0e100;
     SolverInfo info = make_iter_info("pcg_sparse", "sparse", 0.0, model.n_dof, A.n_row);
-    info.converged = iterate_cg_sparse_core(A, b, solver.tol, solver.max_iter, true, x, iter, res);
+    IterHistory hist;
+    init_iter_history(hist, info);
+    info.converged = iterate_cg_sparse_core(A, b, solver.tol, solver.max_iter, true, x, iter, res, &hist);
     info.iterations = iter;
     timer.stop_time(step);
     info.time_seconds = timer.get_time(step);
     finish_iter(model, x, info, res);
+    push_iter_history(model, hist);
     (void)mode_name;
     return info;
 }

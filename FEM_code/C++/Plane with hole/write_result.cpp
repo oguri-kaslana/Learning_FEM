@@ -173,6 +173,29 @@ void write_iterative_solver_summary(const ModelData& model, const string& filena
     }
 }
 
+void write_iterative_history(const ModelData& model, const string& filename)
+{
+    ofstream fout(filename.c_str());
+    open_check(fout, filename);
+    if (!fout.is_open()) return;
+
+    fout << setprecision(12) << fixed;
+    fout << "method,matrix_type,omega,iteration,residual,time_seconds\n";
+
+    for (size_t h = 0; h < model.iterative_history.size(); ++h) {
+        const IterHistory& hist = model.iterative_history[h];
+        const size_t n = hist.iteration.size();
+        for (size_t i = 0; i < n; ++i) {
+            fout << hist.method << ','
+                 << hist.matrix_type << ','
+                 << hist.omega << ','
+                 << hist.iteration[i] << ','
+                 << hist.residual[i] << ','
+                 << hist.time_seconds[i] << '\n';
+        }
+    }
+}
+
 void write_check_info(const ModelData& model,
                       const GeometryParam& geom,
                       const MaterialParam& mat,
@@ -229,6 +252,7 @@ void write_result_base(const ModelData& model,
     write_stress(model, join_path(output_dir, "stress.csv"));
     write_direct_solver_summary(model, join_path(output_dir, "direct_solver_summary.csv"));
     write_iterative_solver_summary(model, join_path(output_dir, "iterative_solver_summary.csv"));
+    write_iterative_history(model, join_path(output_dir, "iterative_history.csv"));
     write_case_summary(model, join_path(output_dir, "case_summary.csv"));
     write_check_info(model, geom, mat, load, join_path(output_dir, "check_info.txt"));
     timer.write_time(join_path(output_dir, "time_summary.csv"), "base");
@@ -253,6 +277,7 @@ void write_result_fast(const ModelData& model,
     write_stress(model, join_path(output_dir, "stress.csv"));
     write_direct_solver_summary(model, join_path(output_dir, "direct_solver_summary.csv"));
     write_iterative_solver_summary(model, join_path(output_dir, "iterative_solver_summary.csv"));
+    write_iterative_history(model, join_path(output_dir, "iterative_history.csv"));
     write_case_summary(model, join_path(output_dir, "case_summary.csv"));
     write_check_info(model, geom, mat, load, join_path(output_dir, "check_info.txt"));
     timer.write_time(join_path(output_dir, "time_summary.csv"), "fast");
